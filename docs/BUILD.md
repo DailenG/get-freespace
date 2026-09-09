@@ -27,8 +27,17 @@ Get-FreeSpace.
 An earlier build (1.2.7.0) targeted the SAPIEN PowerShell 7.4.2 host and both 32-bit and
 64-bit. That was reverted to Windows PowerShell in commit `7332b3b`
 ("Reimplemented switches, switched PS engine back to Windows PowerShell") because
-`Out-GridView` and the packaged PS7 host misbehaved. Do not switch the packaged engine to
-PowerShell 7 without re-testing `Out-GridView` and the `PresentationFramework` popup.
+`Out-GridView` and the packaged PS7 host misbehaved. As of 2.0.0 the code itself runs on
+either engine (`Out-ConsoleGridView` on PS7, `Out-GridView` on 5.1, popup degrades to
+console), so the remaining unknown is the SAPIEN PS7 host. Re-test the packaged selection
+UI and popup before changing the engine setting.
+
+### Payload changed in 2.0.0
+
+`Get-FreeSpace.ps1` is now a wrapper around the module beside it. The package must carry
+`Get-FreeSpace.psd1`, `Get-FreeSpace.psm1`, `Public\*.ps1`, `Private\*.ps1` and
+`paths.json` next to the exe, or startup fails with "module not found next to this
+script". `Tests\` and `legacy\` are not part of the payload.
 
 ## MSI installer
 

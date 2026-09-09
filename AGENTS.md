@@ -18,52 +18,71 @@ commits ahead of upstream and the entire delta is the default `-Source` value po
 mergeable: do not restructure the parameter block without checking it, and treat the two
 `FreespacePaths` repos as one schema.
 
-## Engine constraint
+## Engine support
 
-`Get-FreeSpace.ps1` targets Windows PowerShell 5.1, not PowerShell 7. Two hard
-dependencies drove that:
+The module and CLI run on Windows PowerShell 5.1 and PowerShell 7; the Pester suite is
+kept green on both. Two surfaces used to pin it to 5.1 and are now abstracted:
 
-- `Out-GridView` for the selection UI (absent from PS7 unless `Microsoft.PowerShell.ConsoleGuiTools` or the WPF gridview module is present).
-- `Add-Type -AssemblyName PresentationFramework` for the completion popup.
+- Selection UI: `Select-FSGridView` prefers `Out-ConsoleGridView` on PS7 (from
+  `Microsoft.PowerShell.ConsoleGuiTools`) and `Out-GridView` on 5.1, falling through to
+  the other and then to a console prompt. `Out-ConsoleGridView` throws when stdin is
+  redirected, which is why the fallback chain exists rather than a version check.
+- Completion popup: `Show-FSCompletionPopup` degrades to console output when
+  `PresentationFramework` cannot be loaded.
 
-Commit `7332b3b` reverted a PS7 packaging attempt for exactly this reason. Any move to
-PS7 must replace both surfaces first.
+The packaged exe/MSI is still built on the Windows PowerShell engine. Commit `7332b3b`
+reverted a PS7 packaging attempt in 2024; the blockers above are gone, but re-test the
+SAPIEN PS7 host before switching, since that host is what actually failed.
 
 ## Cleanup list is a separate repo
 
 Path data lives in `DailenG/FreespacePaths` (`paths.json`) and is fetched at runtime via
-`-Source`. `paths.json` here is a snapshot. Adding a cleanup target means a PR there, not
-here. Schema: `name`, `path` (wildcards allowed), `description`, `aged` (minimum age in
-days by `LastAccessTime`, `0` disables).
+`-Source`. `paths.json` here is a snapshot and the offline fallback. Adding a cleanup
+target means a PR there, not here.
 
-## Known issues worth fixing in a rewrite
+Schema: `name`, `path` (wildcards allowed), `description`, `retain_days` (keep items whose
+activity is newer than N days), `scope` (`file` default, or `folder`). `aged` is a
+deprecated alias for `retain_days` and is still honored, so unpatched clients keep
+working. Both `FreespacePaths` repos (`DailenG` and the `pesengineers` fork) must be
+updated to the new keys to benefit; until then their `aged` values apply unchanged.
 
-- Freed-space math round-trips through formatted strings (`"1.23 GB"` parsed back to
-  bytes) in both the script and the legacy module. Track raw bytes; format only at output.
-- `Get-FolderSize` enumerates every file recursively twice per path (before and after
-  deletion). Slow on large temp trees.
-- Errors are swallowed with `-ErrorAction SilentlyContinue` everywhere, so locked or
-  access-denied files are invisible in the report.
-- `Invoke-WebRequest` failure only calls `Write-Error` and then falls through into
-  `ConvertFrom-Json` on `$null`.
-- No `SupportsShouldProcess` in the shipped script, so there is no `-WhatIf`.
-- `aged` retention is folder-level and effectively inert. Verified 2026-09-09 on a
-  synthetic tree: because every list entry ends in a backslash, `Get-ChildItem -Path
-  '...\Journals\' -Directory` returns the matched `Journals` container itself, one per
-  user profile, not its children. So `aged` compares the LastAccessTime of that container,
-  which Revit keeps fresh, and `Remove-FolderContents` then deletes the entire container
-  recursively with no age check at all. Net effect: `aged` either skips a whole path or
-  purges it wholesale, and never protects recent files inside a path. This is the gap
-  behind the "engineer could not read Tuesday's journals on Wednesday morning" complaint.
-  A real fix filters files by timestamp at deletion time, not directories at scan time.
-- Unelevated runs silently see only the current user's profile (`Resolve-Path` on
-  `C:\Users\*` throws access denied on other profiles, swallowed by
-  `-ErrorAction SilentlyContinue`). There is no elevation check or warning.
+## Retention design, and the bug it replaced
+
+Every list entry ends in a backslash, so `Get-ChildItem -Path '...\Journals\' -Directory`
+returns the matched container itself, one per user profile, not its children. Verified on
+a synthetic tree, 2026-09-09.
+
+The old `aged` implementation filtered on that container's `LastAccessTime` and then
+deleted its entire contents with no age check, so retention was all or nothing per folder
+and never protected recent files. That is what let a Wednesday cleanup destroy Tuesday's
+journals.
+
+Now `Get-FreeSpace` resolves the container, then `Get-FSTargetPlan` classifies each item
+inside it against the cutoff and hands the surviving item objects to `Remove-FSPlanItem`,
+so the purge deletes exactly what was measured and shown. Activity is the newest of
+`LastWriteTime`, `CreationTime` and `LastAccessTime`, with last access dropped (and a
+warning raised) when `NtfsDisableLastAccessUpdate` bit 0 says NTFS is not recording it.
+Do not reduce activity to `LastWriteTime` alone: Autodesk projects hold components that
+are read for months without being rewritten.
+
+## Remaining rough edges
+
+- Scanning enumerates every file under every target once per run. Large `Temp` trees take
+  roughly 20 seconds on a warm cache; there is no parallelism and no size cache.
+- `Get-FSTargetPlan` holds `FileInfo` objects for every reclaimable item in memory. Fine
+  for hundreds of thousands of files, not audited beyond that.
+- Failures are collected and reported per run, but there is no retry for files locked by a
+  running Revit.
 
 ## Packaging
 
 Read `docs/BUILD.md` before touching packaging. The MSI ProductGUID/UpgradeGUID must stay
 stable so existing installs upgrade rather than side-install.
+
+`Get-FreeSpace.ps1` is now a wrapper that imports the module beside it, so the packaged
+payload must include `Get-FreeSpace.psd1`, `Get-FreeSpace.psm1`, `Public\`, `Private\` and
+`paths.json`. A build that ships only the exe will fail at startup with "module not found
+next to this script".
 
 ## Commit style
 
